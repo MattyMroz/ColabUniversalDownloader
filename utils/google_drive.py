@@ -46,6 +46,15 @@ class GoogleDriveManager:
         """Sprawdza, czy usługa API Dysku jest gotowa do użycia."""
         return self.drive_service is not None
 
+    # Prost y kontekst do tłumienia wyjątków w pętlach sprzątających
+    from contextlib import contextmanager
+    @contextmanager
+    def _suppress_exc(self):
+        try:
+            yield
+        except Exception:
+            pass
+
     def get_drive_id(self, drive_name: str, is_shared: bool) -> Optional[str]:
         """
         Pobiera ID Dysku (Współdzielonego lub 'root' dla Mojego Dysku).
@@ -135,15 +144,76 @@ class GoogleDriveManager:
             return
 
         def task():
-            print(
-                f"--> [Wątek w tle] Plik {file_id} zostanie usunięty za {delay_seconds}s.")
+            print(f"--> [Wątek w tle] Plik {file_id} zostanie usunięty za {delay_seconds}s.")
+            time.sleep(delay_seconds)
+            # Kilka prób z krótkim odstępem (na wypadek chwilowych błędów)
+            attempts = 3
+            for i in range(1, attempts + 1):
+                try:
+                    self.drive_service.files().delete(fileId=file_id, supportsAllDrives=True).execute()
+                    print(f"--> [Wątek w tle] Plik {file_id} został pomyślnie usunięty.")
+                    return
+                except Exception as e:
+                    if i == attempts:
+                        print(f"--> [Wątek w tle] Błąd podczas usuwania pliku {file_id}: {e}")
+                    else:
+                        time.sleep(2)
+
+        threading.Thread(target=task).start()
+
+    def delete_folder_after_delay(self, folder_id: str, delay_seconds: int):
+        """
+        Usuwa (trwale) folder z Dysku Google po określonym czasie (w osobnym wątku).
+
+        Uwaga: Operacja usuwa folder po stronie GDrive (w większości przypadków trafia on do kosza).
+        Jeśli folder znajduje się na Dysku współdzielonym, wymagane są odpowiednie uprawnienia.
+
+        Args:
+            folder_id (str): ID folderu do usunięcia.
+            delay_seconds (int): Czas w sekundach do usunięcia.
+        """
+        if not self.is_ready():
+            return
+
+        def task():
+            print(f"--> [Wątek w tle] Folder {folder_id} zostanie usunięty za {delay_seconds}s.")
             time.sleep(delay_seconds)
             try:
-                self.drive_service.files().delete(fileId=file_id, supportsAllDrives=True).execute()
-                print(
-                    f"--> [Wątek w tle] Plik {file_id} został pomyślnie usunięty.")
+                # 1) Spróbuj usunąć wszystkie dzieci folderu (do 1000 na stronę)
+                page_token = None
+                while True:
+                    query = f"'{folder_id}' in parents and trashed = false"
+                    resp = self.drive_service.files().list(
+                        q=query,
+                        fields='nextPageToken, files(id)',
+                        pageSize=1000,
+                        supportsAllDrives=True,
+                        includeItemsFromAllDrives=True,
+                        pageToken=page_token
+                    ).execute()
+                    for item in resp.get('files', []):
+                        fid = item.get('id')
+                        if not fid:
+                            continue
+                        with self._suppress_exc():
+                            self.drive_service.files().delete(fileId=fid, supportsAllDrives=True).execute()
+                    page_token = resp.get('nextPageToken')
+                    if not page_token:
+                        break
+
+                # 2) Usuń sam folder (z retry)
+                attempts = 3
+                for i in range(1, attempts + 1):
+                    try:
+                        self.drive_service.files().delete(fileId=folder_id, supportsAllDrives=True).execute()
+                        print(f"--> [Wątek w tle] Folder {folder_id} został pomyślnie usunięty.")
+                        return
+                    except Exception as e:
+                        if i == attempts:
+                            print(f"--> [Wątek w tle] Błąd podczas usuwania folderu {folder_id}: {e}")
+                        else:
+                            time.sleep(2)
             except Exception as e:
-                print(
-                    f"--> [Wątek w tle] Błąd podczas usuwania pliku {file_id}: {e}")
+                print(f"--> [Wątek w tle] Błąd podczas usuwania zawartości folderu {folder_id}: {e}")
 
         threading.Thread(target=task).start()
