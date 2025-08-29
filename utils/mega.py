@@ -325,8 +325,8 @@ def make_refreshing_progress(header_lines: List[str], bar_width: int = 20) -> Ca
     NAME_WIDTH = 19          # szerokość okna nazwy
     LEAD_SPACES = 9          # start "od środka" – 9 spacji
     SCROLL_STEP = 3          # krok przesunięcia nazwy między klatkami
-    FRAMES_PER_TICK = 3      # ile klatek narysować na jeden update z megatools
-    FRAME_DELAY = 0.06       # opóźnienie między klatkami
+    FRAMES_PER_TICK = 4      # ile klatek narysować na jeden update z megatools
+    FRAME_DELAY = 0.25       # opóźnienie między klatkami
 
     state = {"name": None, "total": None, "scroll": 0}  # total w MiB (float), scroll do nazwy
 
