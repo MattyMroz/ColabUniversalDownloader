@@ -308,7 +308,7 @@ def _parse_speed_to_mib_per_s(speed_str: str) -> Optional[float]:
     return None
 
 
-def make_refreshing_progress(header_lines: List[str], bar_width: int = 23) -> Callable[[str], None]:
+def make_refreshing_progress(header_lines: List[str], bar_width: int = 20) -> Callable[[str], None]:
     """Tworzy callback, który rysuje pasek w stylu wget z nagłówkiem (clear_output).
 
     header_lines: lista linii nagłówka, np. [
@@ -331,14 +331,15 @@ def make_refreshing_progress(header_lines: List[str], bar_width: int = 23) -> Ca
         return "[" + "=" * filled + ">" + " " * (width - filled - 1) + "]"
 
     def _format_line(name: str, perc: float, downloaded_mib: float, total_mib: float, speed_str: str) -> str:
-        # 1) 20 znaków przewijanej nazwy + spacja + procent
+        # 1) 19 znaków przewijanej nazwy + spacja + procent (dopasowanie -1)
         # Przygotuj przewijaną nazwę: dołóż odstępy, by przewijanie było płynne
         base = (name or "").strip()
         if not base:
             base = "-"
         scroll_src = (base + "   ") * 2  # trochę zapasu do przewijania
-        idx = state["scroll"] % max(1, (len(scroll_src) - 20))
-        name20 = scroll_src[idx: idx + 20]
+        NAME_WIDTH = 19
+        idx = state["scroll"] % max(1, (len(scroll_src) - NAME_WIDTH))
+        name20 = scroll_src[idx: idx + NAME_WIDTH]
         pct = f"{int(round(perc)):>3}%"
 
         # 2) Pasek postępu jak w wget
@@ -359,8 +360,8 @@ def make_refreshing_progress(header_lines: List[str], bar_width: int = 23) -> Ca
             eta_s = _format_eta(eta)
 
         # 5) Sklej w stały układ odstępów (jak w przykładowej linii wget)
-        # name(20) + ' ' + pct + bar + '  ' + size + '  ' + speed + '    ' + eta
-        return f"{name20} {pct}{bar}  {size_s}  {speed_s}    {eta_s}".rstrip()
+        # name(19) + ' ' + pct + bar + ' ' + size + '  ' + speed + '    ' + eta
+        return f"{name20} {pct}{bar} {size_s}  {speed_s}    {eta_s}".rstrip()
 
     # Przykładowa linia megatools (ang.):
     # name.mp4: 39.78% - 238.4 MiB (249968240 bytes) of 599.3 MiB (39.7 MiB/s)
