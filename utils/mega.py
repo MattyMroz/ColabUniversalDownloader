@@ -324,7 +324,7 @@ def make_refreshing_progress(header_lines: List[str], bar_width: int = 20) -> Ca
     # Stałe formatowania/animacji
     NAME_WIDTH = 19          # szerokość okna nazwy
     LEAD_SPACES = 9          # start "od środka" – 9 spacji
-    SCROLL_STEP = 3          # krok przesunięcia nazwy między klatkami
+    SCROLL_STEP = 1          # krok przesunięcia nazwy między klatkami
     FRAMES_PER_TICK = 4      # ile klatek narysować na jeden update z megatools
     FRAME_DELAY = 0.25       # opóźnienie między klatkami
 
