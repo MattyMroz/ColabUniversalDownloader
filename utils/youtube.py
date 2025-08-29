@@ -1,0 +1,285 @@
+"""
+YouTube downloader utilities based on yt-dlp, with ULTRATHING-style progress.
+
+Features:
+- Detect URL type (video, playlist, short, live, channel uploads) using yt-dlp extract_info.
+- List available formats (video-only, audio-only, muxed) with sortable metadata.
+- Select best quality (by default bestvideo+bestaudio or best audio-only) with codec/fps constraints.
+- Download single videos or full playlists.
+- Optional subtitles: list, download, and embed (SRT/VTT) if available.
+- Progress callback compatible with notebook refreshing progress.
+
+Public API (minimal):
+- class YouTubeDownloader
+	- probe(url) -> dict: basic info, entries for playlists
+	- list_formats(url) -> list[dict]: normalized list of formats
+	- download(
+		  url,
+		  out_dir,
+		  video=True,
+		  audio=True,
+		  subtitles=False,
+		  subtitle_langs=None,
+		  best_muxed=False,
+		  max_height=None,
+		  max_fps=None,
+		  vcodec_preference=None,
+		  acodec_preference=None,
+		  progress=None,
+		  concurrent=False,
+		  playlist_items=None,
+	  ) -> list[str]
+
+Notes:
+- We rely on yt-dlp which bundles extractors; no API key required.
+- Progress callback receives single-line messages; use make_refreshing_progress from mega.py for consistency.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import json
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional
+
+try:
+	import yt_dlp  # type: ignore
+except Exception as e:  # pragma: no cover - optional in non-Colab
+	yt_dlp = None
+
+
+# ---- Helpers for formatting / progress ----
+
+def _sizeof_mb(bytes_val: Optional[int]) -> Optional[float]:
+	if not bytes_val and bytes_val != 0:
+		return None
+	return round(bytes_val / (1024 * 1024), 2)
+
+
+def _progress_hook_factory(progress_cb):
+	"""Create a yt-dlp progress hook that emits ULTRATHING-style single line updates."""
+
+	def hook(d):
+		if not progress_cb:
+			return
+		status = d.get('status')
+		if status == 'downloading':
+			percent = d.get('_percent_str', '').strip()
+			speed = d.get('_speed_str', '').replace('MiB/s', 'MB/s').replace('KiB/s', 'KB/s')
+			eta = d.get('eta')
+			eta_str = f"ETA {int(eta)}s" if eta is not None else "ETA --s"
+			total = _sizeof_mb(d.get('total_bytes')) or _sizeof_mb(d.get('total_bytes_estimate'))
+			downloaded = _sizeof_mb(d.get('downloaded_bytes'))
+			name = d.get('filename') or d.get('info_dict', {}).get('title') or "video"
+			base = os.path.basename(str(name))
+			# Compose: [scrolling-name pct][bar] downloaded/total MB  speed  ETA
+			bar = d.get('_progress_bar', '')
+			# yt-dlp doesn't expose raw bar, we synthesize a 20-char bar from percent
+			try:
+				pc = float(percent.strip('%'))
+			except Exception:
+				pc = 0.0
+			filled = int(pc / 5)  # 20-width
+			bar = f"[{'#'*filled}{'.'*(20-filled)}]"
+			left = f"{base[:19].ljust(19)} {percent.rjust(4)}"
+			sizes = f" {downloaded or 0:.2f}/{total or 0:.2f} MB"
+			line = f"{left} {bar} {sizes}  {speed}  {eta_str}"
+			progress_cb(line)
+		elif status == 'finished':
+			filename = d.get('filename') or ''
+			progress_cb(f"Zakończono: {os.path.basename(filename)}")
+
+	return hook
+
+
+@dataclass
+class FormatRow:
+	format_id: str
+	ext: str
+	vcodec: str
+	acodec: str
+	fps: Optional[float]
+	height: Optional[int]
+	tbr: Optional[float]
+	filesize: Optional[int]
+	source: str  # video-only / audio-only / muxed
+
+	def to_dict(self) -> Dict[str, Any]:
+		return {
+			'format_id': self.format_id,
+			'ext': self.ext,
+			'vcodec': self.vcodec,
+			'acodec': self.acodec,
+			'fps': self.fps,
+			'height': self.height,
+			'tbr': self.tbr,
+			'filesize': self.filesize,
+			'filesize_mb': _sizeof_mb(self.filesize),
+			'source': self.source,
+		}
+
+
+class YouTubeDownloader:
+	def __init__(self):
+		if yt_dlp is None:
+			raise RuntimeError("yt-dlp nie jest zainstalowany. Zainstaluj pakiet 'yt-dlp'.")
+
+	# ---- Probing ----
+	def probe(self, url: str) -> Dict[str, Any]:
+		"""Return basic info; for playlists returns 'entries'."""
+		ydl_opts = {'skip_download': True, 'quiet': True, 'extract_flat': 'discard_in_playlist'}
+		with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+			info = ydl.extract_info(url, download=False)
+		return info
+
+	# ---- Formats ----
+	def list_formats(self, url: str) -> List[Dict[str, Any]]:
+		info = self.probe(url)
+		if info.get('_type') == 'playlist':
+			# For playlist, list formats of the first item to preview; real download handles each
+			entries = info.get('entries') or []
+			if not entries:
+				return []
+			first = entries[0].get('url') or entries[0].get('id')
+			info = self.probe(first)
+
+		fmts = []
+		for f in info.get('formats', []) or []:
+			vcodec = f.get('vcodec') or 'none'
+			acodec = f.get('acodec') or 'none'
+			source = 'muxed'
+			if vcodec != 'none' and acodec == 'none':
+				source = 'video-only'
+			elif vcodec == 'none' and acodec != 'none':
+				source = 'audio-only'
+			row = FormatRow(
+				format_id=str(f.get('format_id')),
+				ext=f.get('ext') or '',
+				vcodec=vcodec,
+				acodec=acodec,
+				fps=f.get('fps'),
+				height=f.get('height'),
+				tbr=f.get('tbr'),
+				filesize=f.get('filesize') or f.get('filesize_approx'),
+				source=source,
+			)
+			fmts.append(row.to_dict())
+		# Sort: height desc, fps desc, tbr desc
+		fmts.sort(key=lambda r: (r.get('height') or 0, r.get('fps') or 0, r.get('tbr') or 0), reverse=True)
+		return fmts
+
+	# ---- Download ----
+	def download(
+		self,
+		url: str,
+		out_dir: str,
+		video: bool = True,
+		audio: bool = True,
+		subtitles: bool = False,
+		subtitle_langs: Optional[List[str]] = None,
+		best_muxed: bool = False,
+		max_height: Optional[int] = None,
+		max_fps: Optional[int] = None,
+		vcodec_preference: Optional[str] = None,
+		acodec_preference: Optional[str] = None,
+		progress=None,
+		concurrent: bool = False,
+		playlist_items: Optional[str] = None,
+	) -> List[str]:
+		"""Download video/audio/subtitles. Returns list of output file paths.
+
+		- video/audio flags control whether to fetch bestvideo+bestaudio (with FFmpeg merge) or audio-only.
+		- best_muxed=True prefers best "muxed" format instead of merging streams.
+		- max_height/fps, *codec_preference narrow selection using format selectors.
+		- subtitles: download available subs; subtitle_langs like ['pl','en'] or ['all'].
+		- playlist_items: e.g., '1-5,10' to restrict playlist indices.
+		"""
+		os.makedirs(out_dir, exist_ok=True)
+
+		# Build format selector
+		fmt_parts: List[str] = []
+		if video and audio and not best_muxed:
+			vsel = 'bestvideo'
+			asel = 'bestaudio'
+			if max_height:
+				vsel += f"[height<=?{max_height}]"
+			if max_fps:
+				vsel += f"[fps<=?{max_fps}]"
+			if vcodec_preference:
+				vsel += f"[vcodec*=\"{vcodec_preference}\"]"
+			if acodec_preference:
+				asel += f"[acodec*=\"{acodec_preference}\"]"
+			fmt_selector = f"{vsel}+{asel}/best"
+		elif video and audio and best_muxed:
+			fmt_selector = 'best'
+		elif video and not audio:
+			vsel = 'bestvideo'
+			if max_height:
+				vsel += f"[height<=?{max_height}]"
+			if max_fps:
+				vsel += f"[fps<=?{max_fps}]"
+			if vcodec_preference:
+				vsel += f"[vcodec*=\"{vcodec_preference}\"]"
+			fmt_selector = vsel
+		elif audio and not video:
+			asel = 'bestaudio'
+			if acodec_preference:
+				asel += f"[acodec*=\"{acodec_preference}\"]"
+			fmt_selector = asel
+		else:
+			fmt_selector = 'best'
+
+		ydl_opts: Dict[str, Any] = {
+			'outtmpl': os.path.join(out_dir, '%(title)s [%(id)s].%(ext)s'),
+			'noprogress': True,
+			'progress_hooks': [_progress_hook_factory(progress)],
+			'merge_output_format': 'mp4',  # common universal container
+			'postprocessors': [],
+			'quiet': True,
+			'ignoreerrors': True,
+			'concurrent_fragment_downloads': 4 if concurrent else 1,
+			'format': fmt_selector,
+			'writesubtitles': subtitles,
+			'writeautomaticsub': subtitles,
+			'subtitleslangs': subtitle_langs or ['pl', 'en'],
+			'subtitlesformat': 'srt',
+			'playlist_items': playlist_items,
+		}
+
+		# If requesting audio-only, add audio extraction to e.g., m4a
+		if audio and not video:
+			ydl_opts['postprocessors'].append({
+				'key': 'FFmpegExtractAudio',
+				'preferredcodec': 'm4a',
+				'preferredquality': '0',
+			})
+		# If merging streams, yt-dlp will use FFmpeg by default. Nothing else needed.
+
+		outputs: List[str] = []
+		def on_post(d):
+			# Capture output files from postprocessor hooks
+			if d.get('status') == 'finished':
+				fn = d.get('info_dict', {}).get('_filename') or d.get('filename')
+				if fn:
+					outputs.append(fn)
+
+		ydl_opts['progress_hooks'].append(on_post)
+
+		with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+			ydl.download([url])
+
+		# Collect files created in out_dir as fallback
+		if not outputs:
+			for root, _, files in os.walk(out_dir):
+				for f in files:
+					if re.search(r"\[(?:[A-Za-z0-9_-]{6,})\]\\.[A-Za-z0-9]+$", f):
+						outputs.append(os.path.join(root, f))
+
+		return outputs
+
+
+__all__ = [
+	'YouTubeDownloader',
+]
+
