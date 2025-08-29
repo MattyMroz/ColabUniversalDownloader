@@ -322,9 +322,6 @@ def make_refreshing_progress(header_lines: List[str], bar_width: int = 20) -> Ca
     """
 
     state = {"name": None, "total": None, "scroll": 0}  # total w MiB (float), scroll do nazwy
-    NAME_WIDTH = 19  # okno nazwy (-1)
-    LEADING_SPACES = 9  # początkowe wcięcie
-    SCROLL_STEP = 3  # szybsze przewijanie
 
     def _bar_from_percent(p: float, width: int) -> str:
         p = max(0.0, min(100.0, p))
@@ -335,14 +332,24 @@ def make_refreshing_progress(header_lines: List[str], bar_width: int = 20) -> Ca
 
     def _format_line(name: str, perc: float, downloaded_mib: float, total_mib: float, speed_str: str) -> str:
         # 1) 19 znaków przewijanej nazwy + spacja + procent (dopasowanie -1)
-        # Przygotuj przewijaną nazwę: dołóż odstępy, by przewijanie było płynne
+        # Na pierwszej klatce zaczynamy z 9 spacjami z przodu, by był efekt "od środka",
+        # potem przewijamy szybciej (większy krok).
         base = (name or "").strip()
         if not base:
             base = "-"
-        # Zacznij od środka: 9 spacji przed nazwą, potem normalne przewijanie
-        scroll_src = (" " * LEADING_SPACES + base + "   ") + (base + "   ") * 3
-        idx = state["scroll"] % max(1, (len(scroll_src) - NAME_WIDTH))
-        name20 = scroll_src[idx: idx + NAME_WIDTH]
+        NAME_WIDTH = 19
+        LEAD_SPACES = 9
+        SCROLL_STEP = 3
+        if state["scroll"] == 0:
+            name20 = (" " * LEAD_SPACES + base)
+            # docięcie/dopełnienie do stałej szerokości 19
+            name20 = (name20 + " " * NAME_WIDTH)[:NAME_WIDTH]
+        else:
+            scroll_src = (base + "   ") * 2  # bufor do przewijania
+            idx = (state["scroll"] * SCROLL_STEP) % max(1, (len(scroll_src) - NAME_WIDTH))
+            name20 = scroll_src[idx: idx + NAME_WIDTH]
+            if len(name20) < NAME_WIDTH:
+                name20 = name20.ljust(NAME_WIDTH)
         pct = f"{int(round(perc)):>3}%"
 
         # 2) Pasek postępu jak w wget
@@ -405,6 +412,6 @@ def make_refreshing_progress(header_lines: List[str], bar_width: int = 20) -> Ca
         for h in header_lines:
             print(h)
         print(out_line)
-    state["scroll"] += SCROLL_STEP
+        state["scroll"] += 1
 
     return _callback
