@@ -149,25 +149,51 @@ class GoogleDriveManager:
             file_id = file.get('id')
             print(f"--> Plik wysłany. ID: {file_id}. Udostępnianie...")
 
-            self.drive_service.permissions().create(
-                fileId=file_id,
-                body={'role': 'reader', 'type': 'anyone'},
-                supportsAllDrives=True
-            ).execute()
+            # Udostępnianie publiczne – retrysy na wypadek błędów przejściowych
+            share_ok = False
+            for i in range(1, 4):
+                try:
+                    self.drive_service.permissions().create(
+                        fileId=file_id,
+                        body={'role': 'reader', 'type': 'anyone'},
+                        supportsAllDrives=True
+                    ).execute()
+                    share_ok = True
+                    break
+                except Exception as e:
+                    if i == 3:
+                        print(f"⚠️ Nie udało się ustawić uprawnień publicznych: {e}")
+                    time.sleep(2)
 
-            updated_file = self.drive_service.files().get(
-                fileId=file_id,
-                fields='webContentLink',
-                supportsAllDrives=True
-            ).execute()
+            # Pobierz link – jeśli publiczny się nie uda, spróbuj chociaż webViewLink
+            public_link = None
+            for i in range(1, 4):
+                try:
+                    updated_file = self.drive_service.files().get(
+                        fileId=file_id,
+                        fields='webContentLink, webViewLink',
+                        supportsAllDrives=True
+                    ).execute()
+                    public_link = updated_file.get('webContentLink')
+                    if public_link:
+                        print("--> Link publiczny wygenerowany.")
+                    else:
+                        # Fallback (może wymagać uprawnień użytkownika)
+                        fallback = updated_file.get('webViewLink')
+                        if fallback:
+                            public_link = fallback
+                            print("--> Link przeglądu pobrany (może wymagać uprawnień).")
+                    break
+                except Exception as e:
+                    if i == 3:
+                        print(f"⚠️ Nie udało się pobrać linku do pliku: {e}")
+                    time.sleep(2)
 
-            public_link = updated_file.get('webContentLink')
-            print("--> Link publiczny wygenerowany.")
-
+            # Zwróć zawsze ID (nawet gdy sharing/link się nie udał)
             return {'link': public_link, 'id': file_id}
 
         except Exception as e:
-            print(f"❌ BŁĄD podczas operacji na Dysku Google: {e}")
+            print(f"❌ BŁĄD podczas przesyłania pliku na Dysk Google: {e}")
             return None
 
     def _find_file_in_folder_by_name(self, parent_id: str, filename: str) -> Optional[Dict[str, str]]:
@@ -234,27 +260,34 @@ class GoogleDriveManager:
             print(f"--> [Wątek w tle] Folder {folder_id} zostanie usunięty za {delay_seconds}s.")
             time.sleep(delay_seconds)
             try:
-                # 1) Spróbuj usunąć wszystkie dzieci folderu (do 1000 na stronę)
-                page_token = None
-                while True:
-                    query = f"'{folder_id}' in parents and trashed = false"
-                    resp = self.drive_service.files().list(
-                        q=query,
-                        fields='nextPageToken, files(id)',
-                        pageSize=1000,
-                        supportsAllDrives=True,
-                        includeItemsFromAllDrives=True,
-                        pageToken=page_token
-                    ).execute()
-                    for item in resp.get('files', []):
-                        fid = item.get('id')
-                        if not fid:
-                            continue
-                        with self._suppress_exc():
-                            self.drive_service.files().delete(fileId=fid, supportsAllDrives=True).execute()
-                    page_token = resp.get('nextPageToken')
-                    if not page_token:
+                # 1) Spróbuj usunąć wszystkie dzieci folderu, wykonując kilka przebiegów (na wypadek opóźnień konsystencji)
+                for _ in range(3):
+                    page_token = None
+                    any_deleted = False
+                    while True:
+                        query = f"'{folder_id}' in parents and trashed = false"
+                        resp = self.drive_service.files().list(
+                            q=query,
+                            fields='nextPageToken, files(id)',
+                            pageSize=1000,
+                            supportsAllDrives=True,
+                            includeItemsFromAllDrives=True,
+                            pageToken=page_token
+                        ).execute()
+                        items = resp.get('files', [])
+                        for item in items:
+                            fid = item.get('id')
+                            if not fid:
+                                continue
+                            with self._suppress_exc():
+                                self.drive_service.files().delete(fileId=fid, supportsAllDrives=True).execute()
+                                any_deleted = True
+                        page_token = resp.get('nextPageToken')
+                        if not page_token:
+                            break
+                    if not any_deleted:
                         break
+                    time.sleep(1)
 
                 # 2) Usuń sam folder (z retry)
                 attempts = 3
