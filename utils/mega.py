@@ -10,9 +10,16 @@ from typing import Callable, List, Optional, Sequence, Tuple, Union
 
 import requests
 
-__all__ = ["Megatools", "MegaError", "MegaDownloader"]
+__all__ = ["Megatools", "MegaError", "MegaDownloader", "make_refreshing_progress"]
 
 logger = logging.getLogger(Path(__file__).stem)
+
+# Bezpieczny import clear_output (jak w Pixeldrain), aby móc rysować odświeżany pasek w notebooku
+try:
+    from IPython.display import clear_output as _clear_output  # type: ignore
+except Exception:  # środowisko bez IPython (fallback: brak czyszczenia)
+    def _clear_output(*args, **kwargs):  # type: ignore
+        pass
 
 
 class MegaError(Exception):
@@ -69,6 +76,9 @@ def _execute(command: List[str], on_line: Optional[Callable[[str], None]] = None
     # Czytaj stderr
     for line in iter(process.stderr.readline, ""):
         err_lines.append(line)
+        if on_line:
+            with contextlib.suppress(Exception):
+                on_line(line)
     return ("".join(out_lines), "".join(err_lines), process.wait())
 
 
@@ -253,3 +263,126 @@ class MegaDownloader:
         if "/folder/" in url:
             return self.download_folder(url, dest_dir=dest_dir, choose_files=choose_files, progress=progress)
         return self.download_file(url, dest_dir=dest_dir, progress=progress)
+
+
+# ------------------------
+# Odświeżany pasek postępu (header + linia jak wget)
+# ------------------------
+
+def _format_eta(seconds: float) -> str:
+    try:
+        seconds = max(0, int(seconds))
+    except Exception:
+        return ""
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"eta {h}h {m}m {s}s"
+    if m:
+        return f"eta {m}m {s}s"
+    return f"eta {s}s"
+
+
+def _parse_speed_to_mib_per_s(speed_str: str) -> Optional[float]:
+    """Zwraca prędkość w MiB/s na podstawie napisu typu '39.7 MiB/s', '4.2 MB/s', '600 KiB/s'."""
+    if not speed_str:
+        return None
+    m = re.match(r"\s*([0-9]+(?:\.[0-9]+)?)\s*([KMG]?i?B)/s\s*", speed_str, re.IGNORECASE)
+    if not m:
+        return None
+    val = float(m.group(1))
+    unit = m.group(2).lower()
+    # Konwersje do MiB
+    if unit in ("mib",):
+        return val
+    if unit in ("mb",):  # MB (dziesiętne) ~ MiB * 1.048576
+        return val / 1.048576
+    if unit in ("kib",):
+        return val / 1024.0
+    if unit in ("kb",):
+        return val / (1024.0 * 1.048576)
+    if unit in ("gib",):
+        return val * 1024.0
+    if unit in ("gb",):
+        return (val * 1024.0) / 1.048576
+    return None
+
+
+def make_refreshing_progress(header_lines: List[str], bar_width: int = 40) -> Callable[[str], None]:
+    """Tworzy callback, który rysuje pasek w stylu wget z nagłówkiem (clear_output).
+
+    header_lines: lista linii nagłówka, np. [
+        "==================== ZADANIE MEGA — PLIK ====================",
+        f"URL: ...",
+        "Nazwa pliku: —",
+        "Rozmiar: —",
+        "--------------------------------------------------",
+    ]
+    Funkcja aktualizuje pozycje 3 i 4 (nazwa i rozmiar), gdy tylko dane będą znane z logu megatools.
+    """
+
+    state = {"name": None, "total": None}  # total w MiB (float)
+
+    def _bar_from_percent(p: float, width: int) -> str:
+        p = max(0.0, min(100.0, p))
+        filled = int((p / 100.0) * width)
+        if filled >= width:
+            return "[" + "=" * width + "]"
+        return "[" + "=" * filled + ">" + " " * (width - filled - 1) + "]"
+
+    def _format_line(perc: float, downloaded_mib: float, total_mib: float, speed_str: str) -> str:
+        # Linia jak wget: " 39%[=====>      ]  238.4M  39.7MB/s    eta 2m 34s"
+        bar = _bar_from_percent(perc, bar_width)
+        # Format rozmiaru zgodny z wget (M z 2 miejscami po przecinku)
+        size_s = f"{downloaded_mib:.2f}M"
+        # Prędkość wyświetlamy tak, jak przyszła (bez konwersji jednostek tekstu)
+        eta_s = ""
+        sp_mib = _parse_speed_to_mib_per_s(speed_str)
+        if sp_mib and total_mib and perc > 0:
+            remaining_mib = max(0.0, total_mib - downloaded_mib)
+            eta = remaining_mib / sp_mib
+            eta_s = _format_eta(eta)
+        # W wget są dwie lub trzy spacje między kolumnami; tutaj użyjemy stałych odstępów
+        return f"{int(round(perc)):>3}%{bar}  {size_s}  {speed_str}    {eta_s}".rstrip()
+
+    # Przykładowa linia megatools (ang.):
+    # name.mp4: 39.78% - 238.4 MiB (249968240 bytes) of 599.3 MiB (39.7 MiB/s)
+    PATTERN = re.compile(
+        r"^(?P<name>[^:]+):\s*"
+        r"(?P<perc>[0-9]+(?:\.[0-9]+)?)%\s*-\s*"
+        r"(?P<down>[0-9]+(?:\.[0-9]+)?)\s*MiB.*?of\s*"
+        r"(?P<total>[0-9]+(?:\.[0-9]+)?)\s*MiB.*?\("
+        r"(?P<speed>[^)]+)\)\s*$",
+        re.IGNORECASE,
+    )
+
+    def _callback(line: str) -> None:
+        s = (line or "").strip()
+        if not s:
+            return
+        m = PATTERN.match(s)
+        if not m:
+            return  # ignoruj niepasujące linie
+        name = m.group("name").strip()
+        perc = float(m.group("perc"))
+        downloaded = float(m.group("down"))
+        total = float(m.group("total"))
+        speed = m.group("speed").strip()
+
+        # Aktualizuj header (nazwa + rozmiar) przy pierwszym wykryciu lub zmianie pliku
+        if name and name != state["name"]:
+            state["name"] = name
+            if len(header_lines) >= 3:
+                header_lines[2] = f"Nazwa pliku: {name}"
+        if total and total != state["total"]:
+            state["total"] = total
+            if len(header_lines) >= 4:
+                header_lines[3] = f"Rozmiar: {total:.2f} MB"
+
+        out_line = _format_line(perc, downloaded, total, speed)
+        _clear_output(wait=True)
+        for h in header_lines:
+            print(h)
+        print(out_line)
+
+    return _callback
