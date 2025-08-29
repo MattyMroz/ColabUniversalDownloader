@@ -308,7 +308,7 @@ def _parse_speed_to_mib_per_s(speed_str: str) -> Optional[float]:
     return None
 
 
-def make_refreshing_progress(header_lines: List[str], bar_width: int = 40) -> Callable[[str], None]:
+def make_refreshing_progress(header_lines: List[str], bar_width: int = 23) -> Callable[[str], None]:
     """Tworzy callback, który rysuje pasek w stylu wget z nagłówkiem (clear_output).
 
     header_lines: lista linii nagłówka, np. [
@@ -321,7 +321,7 @@ def make_refreshing_progress(header_lines: List[str], bar_width: int = 40) -> Ca
     Funkcja aktualizuje pozycje 3 i 4 (nazwa i rozmiar), gdy tylko dane będą znane z logu megatools.
     """
 
-    state = {"name": None, "total": None}  # total w MiB (float)
+    state = {"name": None, "total": None, "scroll": 0}  # total w MiB (float), scroll do nazwy
 
     def _bar_from_percent(p: float, width: int) -> str:
         p = max(0.0, min(100.0, p))
@@ -330,20 +330,37 @@ def make_refreshing_progress(header_lines: List[str], bar_width: int = 40) -> Ca
             return "[" + "=" * width + "]"
         return "[" + "=" * filled + ">" + " " * (width - filled - 1) + "]"
 
-    def _format_line(perc: float, downloaded_mib: float, total_mib: float, speed_str: str) -> str:
-        # Linia jak wget: " 39%[=====>      ]  238.4M  39.7MB/s    eta 2m 34s"
+    def _format_line(name: str, perc: float, downloaded_mib: float, total_mib: float, speed_str: str) -> str:
+        # 1) 20 znaków przewijanej nazwy + spacja + procent
+        # Przygotuj przewijaną nazwę: dołóż odstępy, by przewijanie było płynne
+        base = (name or "").strip()
+        if not base:
+            base = "-"
+        scroll_src = (base + "   ") * 2  # trochę zapasu do przewijania
+        idx = state["scroll"] % max(1, (len(scroll_src) - 20))
+        name20 = scroll_src[idx: idx + 20]
+        pct = f"{int(round(perc)):>3}%"
+
+        # 2) Pasek postępu jak w wget
         bar = _bar_from_percent(perc, bar_width)
-        # Format rozmiaru zgodny z wget (M z 2 miejscami po przecinku)
-        size_s = f"{downloaded_mib:.2f}M"
-        # Prędkość wyświetlamy tak, jak przyszła (bez konwersji jednostek tekstu)
-        eta_s = ""
+
+        # 3) Rozmiar w MB (dziesiętne), format "NNN.NNM" (wg wget: bez 'i')
+        downloaded_mb = downloaded_mib * 1.048576
+        size_s = f"{downloaded_mb:.2f}M"
+
+        # 4) Prędkość w MB/s (dziesiętne) i ETA
         sp_mib = _parse_speed_to_mib_per_s(speed_str)
+        mbps = sp_mib * 1.048576 if sp_mib is not None else None
+        speed_s = f"{mbps:.1f}MB/s" if mbps is not None else speed_str.replace(" ", "")
+        eta_s = ""
         if sp_mib and total_mib and perc > 0:
             remaining_mib = max(0.0, total_mib - downloaded_mib)
             eta = remaining_mib / sp_mib
             eta_s = _format_eta(eta)
-        # W wget są dwie lub trzy spacje między kolumnami; tutaj użyjemy stałych odstępów
-        return f"{int(round(perc)):>3}%{bar}  {size_s}  {speed_str}    {eta_s}".rstrip()
+
+        # 5) Sklej w stały układ odstępów (jak w przykładowej linii wget)
+        # name(20) + ' ' + pct + bar + '  ' + size + '  ' + speed + '    ' + eta
+        return f"{name20} {pct}{bar}  {size_s}  {speed_s}    {eta_s}".rstrip()
 
     # Przykładowa linia megatools (ang.):
     # name.mp4: 39.78% - 238.4 MiB (249968240 bytes) of 599.3 MiB (39.7 MiB/s)
@@ -379,10 +396,11 @@ def make_refreshing_progress(header_lines: List[str], bar_width: int = 40) -> Ca
             if len(header_lines) >= 4:
                 header_lines[3] = f"Rozmiar: {total:.2f} MB"
 
-        out_line = _format_line(perc, downloaded, total, speed)
+        out_line = _format_line(name, perc, downloaded, total, speed)
         _clear_output(wait=True)
         for h in header_lines:
             print(h)
         print(out_line)
+        state["scroll"] += 1
 
     return _callback
