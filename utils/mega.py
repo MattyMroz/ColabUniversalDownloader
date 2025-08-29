@@ -3,6 +3,7 @@ import logging
 import platform
 import re
 import stat
+import time
 from pathlib import Path
 from subprocess import PIPE, Popen
 from tempfile import gettempdir
@@ -320,6 +321,12 @@ def make_refreshing_progress(header_lines: List[str], bar_width: int = 20) -> Ca
     ]
     Funkcja aktualizuje pozycje 3 i 4 (nazwa i rozmiar), gdy tylko dane będą znane z logu megatools.
     """
+    # Stałe formatowania/animacji
+    NAME_WIDTH = 19          # szerokość okna nazwy
+    LEAD_SPACES = 9          # start "od środka" – 9 spacji
+    SCROLL_STEP = 3          # krok przesunięcia nazwy między klatkami
+    FRAMES_PER_TICK = 3      # ile klatek narysować na jeden update z megatools
+    FRAME_DELAY = 0.06       # opóźnienie między klatkami
 
     state = {"name": None, "total": None, "scroll": 0}  # total w MiB (float), scroll do nazwy
 
@@ -337,9 +344,6 @@ def make_refreshing_progress(header_lines: List[str], bar_width: int = 20) -> Ca
         base = (name or "").strip()
         if not base:
             base = "-"
-        NAME_WIDTH = 19
-        LEAD_SPACES = 9
-        SCROLL_STEP = 3
         if state["scroll"] == 0:
             name20 = (" " * LEAD_SPACES + base)
             # docięcie/dopełnienie do stałej szerokości 19
@@ -407,11 +411,15 @@ def make_refreshing_progress(header_lines: List[str], bar_width: int = 20) -> Ca
             if len(header_lines) >= 4:
                 header_lines[3] = f"Rozmiar: {total:.2f} MB"
 
-        out_line = _format_line(name, perc, downloaded, total, speed)
-        _clear_output(wait=True)
-        for h in header_lines:
-            print(h)
-        print(out_line)
-        state["scroll"] += 1
+        # Narysuj kilka klatek na jeden update z megatools – szybciej widoczny ruch nazwy
+        for _ in range(FRAMES_PER_TICK):
+            out_line = _format_line(name, perc, downloaded, total, speed)
+            _clear_output(wait=True)
+            for h in header_lines:
+                print(h)
+            print(out_line)
+            state["scroll"] += 1
+            with contextlib.suppress(Exception):
+                time.sleep(FRAME_DELAY)
 
     return _callback
