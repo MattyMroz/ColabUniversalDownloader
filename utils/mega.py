@@ -322,6 +322,9 @@ def make_refreshing_progress(header_lines: List[str], bar_width: int = 20) -> Ca
     """
 
     state = {"name": None, "total": None, "scroll": 0}  # total w MiB (float), scroll do nazwy
+    NAME_WIDTH = 19  # okno nazwy (-1)
+    LEADING_SPACES = 9  # początkowe wcięcie
+    SCROLL_STEP = 3  # szybsze przewijanie
 
     def _bar_from_percent(p: float, width: int) -> str:
         p = max(0.0, min(100.0, p))
@@ -336,8 +339,8 @@ def make_refreshing_progress(header_lines: List[str], bar_width: int = 20) -> Ca
         base = (name or "").strip()
         if not base:
             base = "-"
-        scroll_src = (base + "   ") * 2  # trochę zapasu do przewijania
-        NAME_WIDTH = 19
+        # Zacznij od środka: 9 spacji przed nazwą, potem normalne przewijanie
+        scroll_src = (" " * LEADING_SPACES + base + "   ") + (base + "   ") * 3
         idx = state["scroll"] % max(1, (len(scroll_src) - NAME_WIDTH))
         name20 = scroll_src[idx: idx + NAME_WIDTH]
         pct = f"{int(round(perc)):>3}%"
@@ -402,6 +405,6 @@ def make_refreshing_progress(header_lines: List[str], bar_width: int = 20) -> Ca
         for h in header_lines:
             print(h)
         print(out_line)
-        state["scroll"] += 1
+    state["scroll"] += SCROLL_STEP
 
     return _callback
