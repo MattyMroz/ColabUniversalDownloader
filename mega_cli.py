@@ -38,15 +38,13 @@ def main():
         print(line, end="")
 
     if "/folder/" in url:
-        print("Lista zawartości (megals):\n")
-        try:
-            listing = downloader.list_folder_contents(url)
-            print(listing)
-        except Exception as e:
-            print(f"Nie udało się wylistować folderu: {e}")
-
-        print("\nRozpoczynam pobieranie folderu...\n")
-        results = downloader.download_folder(url, dest_dir=dest_dir, choose_files=args.choose, progress=progress_printer)
+        print("Rozpoczynam pobieranie folderu...\n")
+        results = downloader.download_folder(
+            url,
+            dest_dir=dest_dir,
+            choose_files=args.choose,
+            progress=progress_printer,
+        )
         if results:
             print("\n✅ Zakończono. Pobrane pliki:")
             for p in results:
