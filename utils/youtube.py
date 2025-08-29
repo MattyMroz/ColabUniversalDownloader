@@ -186,6 +186,8 @@ class YouTubeDownloader:
 		progress=None,
 		concurrent: bool = False,
 		playlist_items: Optional[str] = None,
+		force_mp4: bool = True,
+	strict_mp4_single: bool = False,
 	) -> List[str]:
 		"""Download video/audio/subtitles. Returns list of output file paths.
 
@@ -199,42 +201,60 @@ class YouTubeDownloader:
 
 		# Build format selector
 		fmt_parts: List[str] = []
-		if video and audio and not best_muxed:
-			vsel = 'bestvideo'
-			asel = 'bestaudio'
+		if strict_mp4_single and video and audio:
+			# Only already-muxed MP4
+			fmt_selector = 'b[ext=mp4]'
+		elif video and audio and not best_muxed:
+			# Prefer video-only + audio-only, later merged
+			vsel = 'bv*'
+			asel = 'ba'
 			if max_height:
 				vsel += f"[height<=?{max_height}]"
 			if max_fps:
 				vsel += f"[fps<=?{max_fps}]"
 			if vcodec_preference:
-				vsel += f"[vcodec*=\"{vcodec_preference}\"]"
+				vsel += f"[vcodec~=\"({vcodec_preference})\"]"
+			elif force_mp4:
+				vsel += f"[vcodec~=\"(avc1|h264)\"]"
 			if acodec_preference:
-				asel += f"[acodec*=\"{acodec_preference}\"]"
-			fmt_selector = f"{vsel}+{asel}/best"
+				asel += f"[acodec~=\"({acodec_preference})\"]"
+			elif force_mp4:
+				asel += f"[acodec~=\"(mp4a|aac)\"]"
+			# Fallbacks: unconstrained pair, then best mp4 muxed, then best
+			v_fallback = 'bv*'
+			a_fallback = 'ba'
+			pair_primary = f"{vsel}+{asel}"
+			pair_fallback = f"{v_fallback}+{a_fallback}"
+			mp4_muxed = 'b[ext=mp4]' if force_mp4 else 'best'
+			fmt_selector = f"{pair_primary}/{pair_fallback}/{mp4_muxed}/best"
 		elif video and audio and best_muxed:
-			fmt_selector = 'best'
+			fmt_selector = 'b[ext=mp4]/best' if force_mp4 else 'best'
 		elif video and not audio:
-			vsel = 'bestvideo'
+			vsel = 'bv*'
 			if max_height:
 				vsel += f"[height<=?{max_height}]"
 			if max_fps:
 				vsel += f"[fps<=?{max_fps}]"
 			if vcodec_preference:
-				vsel += f"[vcodec*=\"{vcodec_preference}\"]"
-			fmt_selector = vsel
+				vsel += f"[vcodec~=\"({vcodec_preference})\"]"
+			elif force_mp4:
+				vsel += f"[vcodec~=\"(avc1|h264)\"]"
+			fmt_selector = f"{vsel}/b[ext=mp4]/best" if force_mp4 else f"{vsel}/best"
 		elif audio and not video:
 			asel = 'bestaudio'
 			if acodec_preference:
-				asel += f"[acodec*=\"{acodec_preference}\"]"
+				asel += f"[acodec~=\"({acodec_preference})\"]"
+			elif force_mp4:
+				asel += f"[acodec~=\"(mp4a|aac)\"]"
 			fmt_selector = asel
 		else:
-			fmt_selector = 'best'
+			fmt_selector = 'b[ext=mp4]/best' if force_mp4 else 'best'
 
 		ydl_opts: Dict[str, Any] = {
 			'outtmpl': os.path.join(out_dir, '%(title)s [%(id)s].%(ext)s'),
 			'noprogress': True,
 			'progress_hooks': [_progress_hook_factory(progress)],
-			'merge_output_format': 'mp4',  # common universal container
+			'merge_output_format': None if strict_mp4_single else ('mp4' if force_mp4 else None),
 			'postprocessors': [],
 			'quiet': True,
 			'ignoreerrors': True,
@@ -245,6 +265,8 @@ class YouTubeDownloader:
 			'subtitleslangs': subtitle_langs or ['pl', 'en'],
 			'subtitlesformat': 'srt',
 			'playlist_items': playlist_items,
+			'keepvideo': False,
+			'prefer_free_formats': False if force_mp4 else True,
 		}
 
 		# If requesting audio-only, add audio extraction to e.g., m4a
@@ -254,29 +276,56 @@ class YouTubeDownloader:
 				'preferredcodec': 'm4a',
 				'preferredquality': '0',
 			})
+		if force_mp4 and not strict_mp4_single:
+			# Ensure final container is MP4 when possible
+			ydl_opts['postprocessors'].append({
+				'key': 'FFmpegVideoRemuxer',
+				'preferedformat': 'mp4',
+			})
 		# If merging streams, yt-dlp will use FFmpeg by default. Nothing else needed.
 
 		outputs: List[str] = []
-		def on_post(d):
-			# Capture output files from postprocessor hooks
-			if d.get('status') == 'finished':
-				fn = d.get('info_dict', {}).get('_filename') or d.get('filename')
-				if fn:
-					outputs.append(fn)
 
-		ydl_opts['progress_hooks'].append(on_post)
+		def collect_outputs_from_info(info_obj: Dict[str, Any]):
+			if not info_obj:
+				return
+			if info_obj.get('_type') == 'playlist':
+				for ent in info_obj.get('entries') or []:
+					collect_outputs_from_info(ent or {})
+				return
+			# For single video
+			# requested_downloads entries contain final filepaths
+			rds = info_obj.get('requested_downloads') or []
+			for rd in rds:
+				fp = rd.get('filepath') or rd.get('_filename') or info_obj.get('filepath') or info_obj.get('_filename')
+				if fp:
+					outputs.append(fp)
+			# fallback: filename/file
+			for key in ('filepath', '_filename', 'filename'):
+				fp = info_obj.get(key)
+				if fp:
+					outputs.append(fp)
 
 		with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-			ydl.download([url])
+			info = ydl.extract_info(url, download=True)
+		collect_outputs_from_info(info if isinstance(info, dict) else {})
 
-		# Collect files created in out_dir as fallback
-		if not outputs:
-			for root, _, files in os.walk(out_dir):
-				for f in files:
-					if re.search(r"\[(?:[A-Za-z0-9_-]{6,})\]\\.[A-Za-z0-9]+$", f):
-						outputs.append(os.path.join(root, f))
-
-		return outputs
+		# De-duplicate and filter out temp files
+		uniq: List[str] = []
+		seen = set()
+		for p in outputs:
+			if not p:
+				continue
+			rp = os.path.normcase(os.path.realpath(p))
+			if rp in seen:
+				continue
+			# skip temp parts
+			base = os.path.basename(p)
+			if base.endswith('.part') or base.endswith('.ytdl'):
+				continue
+			seen.add(rp)
+			uniq.append(p)
+		return uniq
 
 
 __all__ = [
