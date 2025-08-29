@@ -41,8 +41,8 @@ class PixelDrainDownloader:
         file_id = match.group(2)
         filename = f"{file_id}.bin"  # Domyślna nazwa w razie błędu API
 
-        # Zbuduj nagłówek
-        header = f"{'='*20} POBIERAM NA MASZYNĘ COLAB {'='*20}\nURL: {url}"
+        # Zbuduj wstępny nagłówek w preferowanym formacie (zostanie wzbogacony po pobraniu metadanych)
+        header = f"{'='*20} ZADANIE PIXELDRAIN {'='*20}\nURL: {url}"
 
         # Pobranie metadanych do nagłówka
         try:
@@ -53,7 +53,7 @@ class PixelDrainDownloader:
             filename = info.get('name', filename)
             size = info.get('size', 0)
             header = (
-                f"{'='*20} POBIERAM NA MASZYNĘ COLAB {'='*20}\n"
+                f"{'='*20} ZADANIE PIXELDRAIN {'='*20}\n"
                 f"URL: {url}\n"
                 f"Nazwa pliku: {filename}\n"
                 f"Rozmiar: {size / 1024 / 1024:.2f} MB\n"
@@ -64,8 +64,7 @@ class PixelDrainDownloader:
             return None
 
         download_url = f"https://pixeldrain.com/api/file/{file_id}?download"
-        command = ['wget', download_url, '-O',
-                   filename, '--progress=bar:force']
+        command = ['wget', download_url, '-O', filename, '--progress=bar:force']
 
         try:
             process = subprocess.Popen(
@@ -91,8 +90,7 @@ class PixelDrainDownloader:
                 print(f"\n✅ POBRANO NA MASZYNĘ COLAB: {filename}")
                 return os.path.abspath(filename)
             else:
-                print(
-                    f"\n❌ BŁĄD! wget zakończył działanie z kodem: {process.returncode}")
+                print(f"\n❌ BŁĄD! wget zakończył działanie z kodem: {process.returncode}")
                 return None
 
         except Exception as e:
