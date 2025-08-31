@@ -1,0 +1,4 @@
+pycryptodome>=3.20.0
+requests>=2.31.0
+tqdm>=4.66.4
+typing-extensions>=4.10.0
