@@ -65,4 +65,4 @@ pip install -r requirements.txt
 
 ![cud.png](docs/images/cud.png)
 
-https://github.com/user-attachments/assets/fa1d04bd-fdc9-4421-a9a6-bff05982e439
+https://github.com/user-attachments/assets/c722023d-3dc1-4084-b0a6-a9af75e9c536
