@@ -58,7 +58,8 @@ pip install -r requirements.txt
 │  └─ progress.py
 ├─ requirements.txt
 └─ docs/
-   └─ images/                           # Miejsce na zrzuty ekranu
+   ├─ images/                           # Miejsce na zrzuty ekranu
+   └─ videos/                           # Miejsce na filmy demo
 ```
 
 ## 🖼️ Zrzuty ekranu

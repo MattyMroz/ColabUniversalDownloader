@@ -335,6 +335,11 @@ class MegaDownloader:
         folder_id, shared_k_a32 = _parse_folder_link(folder_url)
         shared_key_bytes = _a32_to_bytes(shared_k_a32)
 
+        folder_ids_in_url = re.findall(r"/folder/([a-zA-Z0-9_-]{8})", folder_url)
+        target_subfolder: Optional[str] = None
+        if len(folder_ids_in_url) > 1:
+            target_subfolder = folder_ids_in_url[-1]
+
         # List folder nodes (public folder requires `n` in query params)
         resp = _api_call([{"a": "f", "c": 1, "r": 1, "ca": 1}], query_params={"n": folder_id})[0]
         nodes = resp.get("f") if isinstance(resp, dict) else None
@@ -384,10 +389,29 @@ class MegaDownloader:
                 p = cur.get("p")
                 cur = by_h.get(p)
                 if cur and cur.get("t") == 1:
-                    nm = names.get(cur.get("h"), "")
+                    hid = cur.get("h")
+                    nm = names.get(hid, "")
                     if nm:
                         parts.append(nm)
+                    if target_subfolder and hid == target_subfolder:
+                        break
             return Path(*reversed(parts)) if parts else Path("")
+
+        allowed: Optional[set] = None
+        if target_subfolder and target_subfolder in by_h:
+            children_map: Dict[str, List[str]] = {}
+            for n in nodes:
+                if isinstance(n, dict) and isinstance(n.get("h"), str) and isinstance(n.get("p"), str):
+                    children_map.setdefault(n.get("p"), []).append(n.get("h"))
+            stack = [target_subfolder]
+            allowed = set()
+            while stack:
+                cur = stack.pop()
+                if cur in allowed:
+                    continue
+                allowed.add(cur)
+                for ch in children_map.get(cur, []):
+                    stack.append(ch)
 
         out_dir = Path(dest_dir or ".")
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -400,6 +424,8 @@ class MegaDownloader:
             h = n.get("h")
             if not isinstance(h, str):
                 continue
+            if allowed is not None and h not in allowed:
+                continue
             kb = node_key_bytes(n)
             if not kb:
                 continue
@@ -407,6 +433,14 @@ class MegaDownloader:
             key_bytes, iv8 = _derive_key_iv_from_k(k_a32)
             name = names.get(h, h)
             rel = full_path(h) / name
+            if target_subfolder and target_subfolder in by_h:
+                # ensure rel starts at target subfolder (strip any parents above it)
+                parts = list(rel.parts)
+                if parts:
+                    target_name = names.get(target_subfolder, "")
+                    if target_name and target_name in parts:
+                        idx = parts.index(target_name)
+                        rel = Path(*parts[idx:])
             (out_dir / rel.parent).mkdir(parents=True, exist_ok=True)
 
             gi = _api_call([{"a": "g", "g": 1, "n": h}], query_params={"n": folder_id})[0]
